@@ -20,27 +20,94 @@ import {
   FileJson,
   Code,
   Copy,
-  HardDrive
+  Wifi,
+  Image,
+  AlertCircle,
+  CheckCircle2
 } from 'lucide-react';
 
 // --- Constants & Types ---
 
+// OUI Prefixes for MAC Spoofing
+const MAC_OUIS = {
+  "VirtualBox (Default)": "080027",
+  "Intel": "0007E9",
+  "Dell": "001422",
+  "HP": "001871",
+  "Realtek": "00E04C",
+  "Cisco": "00000C"
+};
+
+const NIC_TYPES = [
+  "82540EM", // Intel PRO/1000 MT Desktop
+  "82543GC", // Intel PRO/1000 T Server
+  "82545EM", // Intel PRO/1000 MT Server
+  "Am79C970A", // PCnet-PCI II
+  "Am79C973", // PCnet-FAST III
+  "virtio-net" // Paravirtualized Network
+];
+
+const STORAGE_CONTROLLERS = [
+  "IntelAhci",
+  "PIIX4",
+  "ICH6",
+  "PIIX3"
+];
+
+const CPUID_PRESETS = {
+  "Default": [],
+  "Intel IvyBridge": [
+    { leaf: "00000001", eax: "000306A9", ebx: "00100800", ecx: "7F9AE3BF", edx: "BFEBFBFF" }
+  ],
+  "Intel Skylake": [
+    { leaf: "00000001", eax: "000506E3", ebx: "00100800", ecx: "7FFAFEBF", edx: "BF-BF-BF" }
+  ],
+  "AMD Ryzen": [
+    { leaf: "00000001", eax: "00800F11", ebx: "00000000", ecx: "00000000", edx: "00000000" } // Simplified example
+  ]
+};
+
+// Expanded Presets with Hardware Config
 const PRESETS = {
   "自定义 (Custom)": {},
   "Dell OptiPlex 7050": {
-    DmiBIOSVendor: "Dell Inc.",
-    DmiBIOSVersion: "1.15.1",
-    DmiSystemVendor: "Dell Inc.",
-    DmiSystemProduct: "OptiPlex 7050",
-    DmiBoardVendor: "Dell Inc.",
-    DmiBoardProduct: "0F5C5X",
-    DmiChassisVendor: "Dell Inc.",
-    DmiProcManufacturer: "Intel(R) Corporation",
-    DmiProcVersion: "Intel(R) Core(TM) i7-7700 CPU @ 3.60GHz"
+    config: {
+        DmiBIOSVendor: "Dell Inc.",
+        DmiBIOSVersion: "1.15.1",
+        DmiSystemVendor: "Dell Inc.",
+        DmiSystemProduct: "OptiPlex 7050",
+        DmiBoardVendor: "Dell Inc.",
+        DmiBoardProduct: "0F5C5X",
+        DmiChassisVendor: "Dell Inc.",
+        DmiProcManufacturer: "Intel(R) Corporation",
+        DmiProcVersion: "Intel(R) Core(TM) i7-7700 CPU @ 3.60GHz"
+    },
+    vmConfig: {
+        nicType: "82540EM",
+        videoResolution: "1920x1080",
+        storageController: "IntelAhci"
+    }
+  },
+  "Lenovo ThinkPad X1": {
+    config: {
+        DmiBIOSVendor: "LENOVO",
+        DmiBIOSVersion: "N2HET45W (1.28 )",
+        DmiSystemVendor: "LENOVO",
+        DmiSystemProduct: "20QDCTO1WW",
+        DmiBoardVendor: "LENOVO",
+        DmiBoardProduct: "20QDCTO1WW",
+        DmiChassisVendor: "LENOVO",
+        DmiProcManufacturer: "Intel(R) Corporation",
+        DmiProcVersion: "Intel(R) Core(TM) i7-8565U CPU @ 1.80GHz"
+    },
+    vmConfig: {
+        nicType: "82545EM",
+        videoResolution: "2560x1440",
+        storageController: "IntelAhci"
+    }
   }
 };
 
-// 字段命名完全对齐 antivmdetect.py 的逻辑需求
 const DEFAULT_TEMPLATE = {
   // BIOS
   DmiBIOSVendor: "American Megatrends Inc.",
@@ -91,7 +158,6 @@ const DEFAULT_TEMPLATE = {
   AcpiTablePath: "" 
 };
 
-// 这里的 Security 选项已重构为 antivmdetection 原项目相关的伪装行为
 const DEFAULT_SECURITY = {
   spoofRegistry: true,      // 写入 HKLM 注册表 (BIOS/CPU/Disk)
   generateFakeFiles: true,  // 生成 Desktop/Documents 伪装文件
@@ -108,10 +174,15 @@ const DEFAULT_VM_CONFIG = {
   vramSize: "128",
   diskSize: "60000", 
   networkMode: "nat",
-  isoPath: ""
+  isoPath: "",
+  // New Fields
+  macAddress: "080027123456",
+  nicType: "82540EM",
+  storageController: "IntelAhci",
+  videoResolution: "1920x1080",
+  videoColorDepth: "32"
 };
 
-// 保留 Region 配置作为附加功能，但不干扰核心逻辑
 const DEFAULT_REGION_CONFIG = {
   RegionLocale: "zh-CN",
   TimeZone: "China Standard Time",
@@ -124,6 +195,7 @@ type SecurityData = typeof DEFAULT_SECURITY;
 type VmConfigData = typeof DEFAULT_VM_CONFIG;
 type RegionConfigData = typeof DEFAULT_REGION_CONFIG;
 type CustomField = { key: string; value: string };
+type CpuidLeaf = { leaf: string; eax: string; ebx: string; ecx: string; edx: string };
 
 // --- Python Script Template (Updated to match functionality) ---
 const generatePythonScriptCode = () => `#!/usr/bin/python3
@@ -137,7 +209,7 @@ import uuid
 import random
 import re
 
-VERSION = "WebGUI-Compat-1.0"
+VERSION = "WebGUI-Compat-1.1"
 
 def generate_script(vm_name, config, filename):
     script_content = []
@@ -183,6 +255,15 @@ const generateRandomSerial = (minLen: number = 10, maxLen: number = 20) => {
   return result;
 };
 
+const generateRandomMac = (oui: string = "080027") => {
+    let mac = oui;
+    const chars = "0123456789ABCDEF";
+    for(let i=0; i<6; i++) {
+        mac += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return mac;
+};
+
 // --- React App Components ---
 
 const App = () => {
@@ -190,12 +271,14 @@ const App = () => {
   const [security, setSecurity] = useState<SecurityData>({ ...DEFAULT_SECURITY });
   const [vmConfig, setVmConfig] = useState<VmConfigData>({...DEFAULT_VM_CONFIG});
   const [regionConfig, setRegionConfig] = useState<RegionConfigData>({...DEFAULT_REGION_CONFIG});
+  const [cpuidLeaves, setCpuidLeaves] = useState<CpuidLeaf[]>([]);
   const [customFields, setCustomFields] = useState<CustomField[]>([]);
   const [activeTab, setActiveTab] = useState("BIOS");
   const [vmName, setVmName] = useState("MyVM");
   const [appendCreate, setAppendCreate] = useState(false);
   const [previewContent, setPreviewContent] = useState("");
   const [previewType, setPreviewType] = useState<'bat' | 'sh' | 'ps1'>('bat');
+  const [warnings, setWarnings] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const updateRegionConfig = (key: keyof RegionConfigData, value: string) => {
@@ -214,6 +297,46 @@ const App = () => {
     setConfig(prev => ({ ...prev, [key]: value }));
   };
 
+  const addCpuidLeaf = () => {
+    setCpuidLeaves([...cpuidLeaves, { leaf: "00000000", eax: "00000000", ebx: "00000000", ecx: "00000000", edx: "00000000" }]);
+  };
+
+  const updateCpuidLeaf = (index: number, field: keyof CpuidLeaf, value: string) => {
+    const newLeaves = [...cpuidLeaves];
+    newLeaves[index][field] = value;
+    setCpuidLeaves(newLeaves);
+  };
+
+  const removeCpuidLeaf = (index: number) => {
+    setCpuidLeaves(cpuidLeaves.filter((_, i) => i !== index));
+  };
+
+  // --- Consistency Checker ---
+  useEffect(() => {
+    const newWarnings: string[] = [];
+    const vendor = config.DmiSystemVendor.toLowerCase();
+    const proc = config.DmiProcManufacturer.toLowerCase();
+    const diskModel = config.DiskModelNumber.toLowerCase();
+
+    // Logic Check 1: Apple Hardware with Non-Apple CPU
+    if (vendor.includes("apple") && (proc.includes("amd") || proc.includes("ryzen"))) {
+        newWarnings.push("一致性警告: 选择了 Apple 厂商，但处理器配置为 AMD。真实 Mac 通常使用 Intel 或 Apple Silicon。");
+    }
+
+    // Logic Check 2: Disk Vendor Mismatch
+    if (diskModel.includes("samsung") && config.DiskSerialNumber.startsWith("WD")) {
+        newWarnings.push("一致性警告: 硬盘型号显示为 Samsung，但序列号似乎符合 Western Digital 格式。");
+    }
+
+    // Logic Check 3: UUID Format
+    if (config.DmiSystemUuid && !/^[0-9A-F-]{36}$/i.test(config.DmiSystemUuid)) {
+        newWarnings.push("格式警告: 系统 UUID 似乎不符合标准格式 (8-4-4-4-12)。");
+    }
+
+    setWarnings(newWarnings);
+  }, [config, vmConfig]);
+
+
   // --- CORE LOGIC: Host Script Generation (BAT/SH) ---
 
   const getHardwareScript = (type: 'bat' | 'sh') => {
@@ -221,8 +344,9 @@ const App = () => {
     const isBat = type === 'bat';
     const cmt = isBat ? "REM" : "#";
     // Handle spaces in VM name correctly
-    const vmRef = isBat ? `"${vmName}"` : `"${vmName}"`; 
+    const vmRef = `"${vmName}"`; 
     const pre = `VBoxManage setextradata ${vmRef}`;
+    const mod = `VBoxManage modifyvm ${vmRef}`;
     const now = new Date().toLocaleString();
 
     if (isBat) {
@@ -230,39 +354,82 @@ const App = () => {
         lines.push(`${cmt} Generated by AntiVM WebGUI (antivmdetect.py compatible)`);
         lines.push(`${cmt} Timestamp: ${now}`);
         lines.push(`echo Configuring VM: ${vmName}...`);
-        // Fixed: Robust Windows check using literal string search to handle spaces
-        lines.push(`VBoxManage list vms | findstr /C:"\\"${vmName}\\"" >nul`);
+        
+        // [FIX] Robust Windows check using variable to handle spaces
+        lines.push(`set "VM_NAME=${vmName}"`);
+        lines.push(`VBoxManage list vms | findstr /C:"\\"%VM_NAME%\\"" >nul`);
         lines.push(`if %errorlevel% neq 0 ( echo [ERROR] VM "${vmName}" not found! & pause & exit /b )`);
     } else {
         lines.push("#!/bin/bash");
         lines.push(`${cmt} Generated by AntiVM WebGUI (antivmdetect.py compatible)`);
         lines.push(`${cmt} Timestamp: ${now}`);
         lines.push(`echo "Configuring VM: ${vmName}..."`);
-        // Fixed: Linux grep check for exact match
-        lines.push(`if ! VBoxManage list vms | grep -q "\\"^${vmName}\\"""; then echo "[ERROR] VM '${vmName}' not found!"; exit 1; fi`);
+        
+        // [FIX] Robust Linux check using grep fixed string
+        lines.push(`if ! VBoxManage list vms | grep -Fq "\\"^${vmName}\\"""; then echo "[ERROR] VM '${vmName}' not found!"; exit 1; fi`);
     }
     lines.push("");
 
     if (appendCreate) {
-        lines.push(`${cmt} --- Create VM (antivmdetect compatible settings) ---`);
-        // Original creates with PIIX3 and IOAPIC on
+        lines.push(`${cmt} --- Create VM (Updated for spoofing) ---`);
         lines.push(`VBoxManage createvm --name ${vmRef} --ostype "${vmConfig.osType}" --register`);
-        lines.push(`VBoxManage modifyvm ${vmRef} --memory ${vmConfig.memorySize} --cpus ${vmConfig.cpuCount} --nic1 ${vmConfig.networkMode} --vram ${vmConfig.vramSize} --chipset piix3 --ioapic on --paravirtprovider default --audio none`);
+        
+        // [FIX] Logic to determine Bus Type and Chipset based on Controller selection
+        const isIde = ["PIIX3", "PIIX4", "ICH6"].includes(vmConfig.storageController);
+        const busType = isIde ? "ide" : "sata";
+        // Use piix3 chipset for legacy/IDE compatibility, or ich9 for SATA default.
+        // Also ensure firmware is BIOS for pcbios DMI spoofing.
+        const chipset = isIde ? "piix3" : "ich9"; 
+        
+        // [FIX] Added --firmware bios
+        lines.push(`VBoxManage modifyvm ${vmRef} --memory ${vmConfig.memorySize} --cpus ${vmConfig.cpuCount} --nic1 ${vmConfig.networkMode} --vram ${vmConfig.vramSize} --chipset ${chipset} --firmware bios --ioapic on --paravirtprovider default --audio none`);
+        
         if (vmConfig.diskSize) {
              const diskCmd = `VBoxManage createhd --filename "${vmName}.vdi" --size ${vmConfig.diskSize}`;
              lines.push(diskCmd);
-             // Create BOTH SATA and IDE controllers to match storage spoofing logic
-             lines.push(`VBoxManage storagectl ${vmRef} --name "SATA" --add sata --controller IntelAHCI`);
-             lines.push(`VBoxManage storageattach ${vmRef} --storagectl "SATA" --port 0 --device 0 --type hdd --medium "${vmName}.vdi"`);
-             lines.push(`VBoxManage storagectl ${vmRef} --name "IDE" --add ide --controller PIIX4`);
+             
+             // [FIX] Use correct bus type (sata vs ide)
+             lines.push(`VBoxManage storagectl ${vmRef} --name "MainStorage" --add ${busType} --controller ${vmConfig.storageController}`);
+             
+             // [FIX] Attach to correct port/device. 
+             // IDE: port 0 device 0 (Primary Master). SATA: port 0 device 0.
+             lines.push(`VBoxManage storageattach ${vmRef} --storagectl "MainStorage" --port 0 --device 0 --type hdd --medium "${vmName}.vdi"`);
         }
         lines.push("");
     }
 
+    lines.push(`${cmt} --- Hardware Spoofing (New Features) ---`);
+    // MAC Address
+    if (vmConfig.macAddress) {
+        lines.push(`${mod} --macaddress1 ${vmConfig.macAddress.replace(/:/g, '')}`);
+    }
+    // NIC Type
+    if (vmConfig.nicType) {
+        lines.push(`${mod} --nictype1 ${vmConfig.nicType}`);
+    }
+    // CPUID Spoofing
+    if (cpuidLeaves.length > 0) {
+        lines.push(`${cmt} CPUID Leaves`);
+        cpuidLeaves.forEach(leaf => {
+            // [FIX] Sanitize CPUID values (remove 0x prefix)
+            const clean = (val: string) => val.replace(/^0x/i, '');
+            lines.push(`${mod} --cpuidset ${clean(leaf.leaf)} ${clean(leaf.eax)} ${clean(leaf.ebx)} ${clean(leaf.ecx)} ${clean(leaf.edx)}`);
+        });
+    }
+
+    lines.push(`${cmt} --- Display & Canvas Spoofing ---`);
+    // Video Mode & Resolution
+    if (vmConfig.videoResolution) {
+        const [w, h] = vmConfig.videoResolution.split('x');
+        const depth = vmConfig.videoColorDepth || "32";
+        lines.push(`${pre} "CustomVideoMode1" "${vmConfig.videoResolution}x${depth}"`);
+        lines.push(`${pre} "GUI/LastGuestSizeHint" "${w},${h}"`);
+    }
+
+    lines.push("");
     lines.push(`${cmt} --- DMI Configuration (Type 0, 1, 2, 3, 4, 11) ---`);
     
     // 1. DMI Fields Mapping
-    // This map ensures we output the exact keys expected by VBoxInternal
     const DMI_MAP: Array<[string, keyof ConfigData]> = [
         ["VBoxInternal/Devices/pcbios/0/Config/DmiBIOSVendor", "DmiBIOSVendor"],
         ["VBoxInternal/Devices/pcbios/0/Config/DmiBIOSVersion", "DmiBIOSVersion"],
@@ -296,8 +463,6 @@ const App = () => {
         ["VBoxInternal/Devices/pcbios/0/Config/DmiOEMVBoxRev", "DmiOEMVBoxRev"],
     ];
 
-    // FIX A1: Strict string prefix logic based on antivmdetect.py
-    // Numeric fields (Major/Minor/Type) are excluded.
     const STRING_FIELDS = new Set([
         "DmiBIOSVendor", "DmiBIOSVersion", "DmiBIOSReleaseDate",
         "DmiSystemVendor", "DmiSystemProduct", "DmiSystemVersion", "DmiSystemSerial", "DmiSystemFamily", "DmiSystemSKU",
@@ -309,29 +474,24 @@ const App = () => {
 
     for (const [path, key] of DMI_MAP) {
         let val = config[key];
-        if (!val) continue; // Skip empty fields
-
-        // Logic: If field is in String List AND doesn't already start with string:, add it.
-        // We also allow the user to manually type "string:" without double-prefixing.
+        if (!val) continue; 
         if (STRING_FIELDS.has(key) && !val.startsWith("string:") && !val.includes("**")) {
             val = `string:${val}`;
         }
         lines.push(`${pre} "${path}" "${val}"`);
     }
 
-    // 2. Storage Spoofing (Dual Controller: AHCI + PIIX3)
-    // FIX A3: Write to both controllers to ensure compatibility
+    // 2. Storage Spoofing (Dual Controller)
     lines.push("");
-    lines.push(`${cmt} --- Storage Controllers (AHCI + PIIX3) ---`);
+    lines.push(`${cmt} --- Storage Controllers (Dual Write) ---`);
     
-    // FIX: Field names matched to antivmdetect.py requirements
     const diskFields = [
         ["SerialNumber", config.DiskSerialNumber],
         ["ModelNumber", config.DiskModelNumber],
-        ["FirmwareRevision", config.DiskFirmwareRevision] // Key name is FirmwareRevision, not Revision
+        ["FirmwareRevision", config.DiskFirmwareRevision]
     ];
     
-    // Write to AHCI Port 0 AND PIIX3 PrimaryMaster
+    // Write to both possible controller locations
     const diskPrefixes = [
         "VBoxInternal/Devices/ahci/0/Config/Port0/",
         "VBoxInternal/Devices/piix3ide/0/Config/PrimaryMaster/"
@@ -342,15 +502,12 @@ const App = () => {
         });
     });
 
-    // CDROM
-    // FIX: Field names matched to antivmdetect.py requirements
     const cdFields = [
         ["ATAPISerialNumber", config.ATAPISerialNumber],
         ["ATAPIRevision", config.ATAPIRevision],
         ["ATAPIProductId", config.ATAPIProductId],
         ["ATAPIVendorId", config.ATAPIVendorId]
     ];
-    // Write to AHCI Port 1 AND PIIX3 PrimarySlave
     const cdPrefixes = [
         "VBoxInternal/Devices/ahci/0/Config/Port1/",
         "VBoxInternal/Devices/piix3ide/0/Config/PrimarySlave/"
@@ -361,11 +518,10 @@ const App = () => {
         });
     });
 
-    // 3. ACPI / DSDT (FIX A4)
+    // 3. ACPI / DSDT
     if (config.AcpiTablePath) {
         lines.push("");
         lines.push(`${cmt} --- ACPI Custom Table ---`);
-        // We only generate the command. The user must provide the binary file path on Host.
         lines.push(`${pre} "VBoxInternal/Devices/acpi/0/Config/CustomTable" "${config.AcpiTablePath}"`);
     }
 
@@ -397,7 +553,6 @@ const App = () => {
 Write-Host "Starting Anti-VM Configuration..." -ForegroundColor Cyan
 
 # --- 1. Registry Spoofing (Hardened) ---
-# FIX B3: Correct Registry Paths for Hardware Spoofing inside Guest
 Write-Host "[-] Spoofing Registry Hardware Keys..."
 
 # 1.1 BIOS & System
@@ -424,14 +579,13 @@ if (Test-Path $RegCpu) {
 }
 
 # 1.3 SCSI/HDD Identifier
-# Matches antivmdetect target keys
 $RegScsi = "HKLM:\\HARDWARE\\DEVICEMAP\\Scsi\\Scsi Port 0\\Scsi Bus 0\\Target Id 0\\Logical Unit Id 0"
 if (Test-Path $RegScsi) {
     Set-ItemProperty -Path $RegScsi -Name "Identifier" -Value "${config.DiskModelNumber}" -Force
     Set-ItemProperty -Path $RegScsi -Name "SerialNumber" -Value "${config.DiskSerialNumber}" -Force
 }
 
-# --- 2. Randomize Product IDs (FIX B1) ---
+# --- 2. Randomize Product IDs ---
 ${security.randomizeProductIds ? `
 Write-Host "[-] Randomizing ProductId..."
 $RegNT = "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"
@@ -441,9 +595,9 @@ if (Test-Path $RegNT) {
 }
 ` : '# ProductID Randomization skipped'}
 
-# --- 3. Fake Files Generator (FIX B1) ---
+# --- 3. Fake Files Generator ---
 ${security.generateFakeFiles ? `
-Write-Host "[-] Generating Fake User Activity (Desktop/Documents)..."
+Write-Host "[-] Generating Fake User Activity..."
 $desktop = [Environment]::GetFolderPath("Desktop")
 $docs = [Environment]::GetFolderPath("MyDocuments")
 for ($i=0; $i -lt 5; $i++) {
@@ -454,13 +608,13 @@ for ($i=0; $i -lt 5; $i++) {
 }
 ` : '# Fake file generation skipped'}
 
-# --- 4. Honeytokens (FIX B1) ---
+# --- 4. Honeytokens ---
 ${security.injectHoneytokens ? `
 Write-Host "[-] Injecting Clipboard Honeytokens..."
 Set-Clipboard -Value "password123"
 ` : '# Honeytokens skipped'}
 
-# --- 5. VBox Cleanup (FIX B1) ---
+# --- 5. VBox Cleanup ---
 ${security.removeVBoxFiles ? `
 Write-Host "[-] Removing VirtualBox Artifacts..."
 $Drivers = @("VBoxMouse.sys", "VBoxGuest.sys", "VBoxSF.sys", "VBoxVideo.sys")
@@ -470,10 +624,12 @@ foreach ($drv in $Drivers) {
 }
 ` : '# VBox Cleanup skipped'}
 
-# --- 6. Region (Optional) ---
+# --- 6. Region (Guest Environment) ---
 Write-Host "[-] Setting Region: ${regionConfig.RegionLocale}..."
 Set-WinSystemLocale -SystemLocale "${regionConfig.RegionLocale}"
 Set-TimeZone -Id "${regionConfig.TimeZone}"
+Set-WinUserLanguageList -LanguageList "${regionConfig.LanguageList}" -Force
+Set-WinHomeLocation -GeoId ${regionConfig.GeoID}
 
 Write-Host "[+] Configuration Complete. Please REBOOT." -ForegroundColor Green
 Start-Sleep -Seconds 3
@@ -486,7 +642,7 @@ Start-Sleep -Seconds 3
     if (previewType === 'bat') setPreviewContent(getHardwareScript('bat'));
     if (previewType === 'sh') setPreviewContent(getHardwareScript('sh'));
     if (previewType === 'ps1') setPreviewContent(getGuestPs1());
-  }, [config, regionConfig, vmName, appendCreate, vmConfig, customFields, security, previewType]);
+  }, [config, regionConfig, vmName, appendCreate, vmConfig, customFields, security, previewType, cpuidLeaves]);
 
   // --- Actions ---
 
@@ -499,6 +655,9 @@ Start-Sleep -Seconds 3
     newConfig.DiskSerialNumber = generateRandomSerial(12, 20);
     newConfig.ATAPISerialNumber = generateRandomSerial(12, 20);
     setConfig(newConfig);
+    
+    // Randomize MAC too
+    setVmConfig(prev => ({...prev, macAddress: generateRandomMac("001422")}));
   };
 
   const applyPreset = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -506,7 +665,18 @@ Start-Sleep -Seconds 3
     // @ts-ignore
     const preset = PRESETS[name];
     if (preset) {
-        setConfig(prev => ({ ...prev, ...preset }));
+        if (preset.config) setConfig(prev => ({ ...prev, ...preset.config }));
+        if (preset.vmConfig) setVmConfig(prev => ({ ...prev, ...preset.vmConfig }));
+        if (preset.regionConfig) setRegionConfig(prev => ({ ...prev, ...preset.regionConfig }));
+    }
+  };
+
+  const applyCpuidPreset = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const name = e.target.value;
+    // @ts-ignore
+    const preset = CPUID_PRESETS[name];
+    if (preset) {
+        setCpuidLeaves(preset);
     }
   };
 
@@ -526,10 +696,11 @@ Start-Sleep -Seconds 3
         security,
         vmConfig,
         regionConfig,
+        cpuidLeaves,
         customFields,
         vmName,
         appendCreate,
-        version: "3.3.0"
+        version: "3.4.0"
     };
     downloadFile("antivm_config.json", JSON.stringify(data, null, 2), "application/json");
   };
@@ -545,6 +716,7 @@ Start-Sleep -Seconds 3
             if (data.security) setSecurity(prev => ({ ...prev, ...data.security }));
             if (data.vmConfig) setVmConfig(prev => ({ ...prev, ...data.vmConfig }));
             if (data.regionConfig) setRegionConfig(prev => ({ ...prev, ...data.regionConfig }));
+            if (data.cpuidLeaves) setCpuidLeaves(data.cpuidLeaves);
             if (data.customFields) setCustomFields(data.customFields);
             if (data.vmName) setVmName(data.vmName);
             if (data.appendCreate !== undefined) setAppendCreate(data.appendCreate);
@@ -592,7 +764,7 @@ Start-Sleep -Seconds 3
             <div className="bg-blue-600 p-2 rounded-lg"><Monitor size={24} className="text-white" /></div>
             <div>
                 <h1 className="text-xl font-bold tracking-tight">Anti-VM Manager Pro</h1>
-                <p className="text-xs text-slate-400">Strict Compatibility Mode: antivmdetect.py</p>
+                <p className="text-xs text-slate-400">Advanced Spoofing & Environment Generator</p>
             </div>
           </div>
           <div className="flex gap-3">
@@ -609,6 +781,17 @@ Start-Sleep -Seconds 3
           </div>
         </header>
 
+        {/* Consistency Warnings */}
+        {warnings.length > 0 && (
+            <div className="bg-yellow-50 border-b border-yellow-200 px-6 py-2 flex flex-col gap-1">
+                {warnings.map((w, i) => (
+                    <div key={i} className="flex items-center gap-2 text-xs text-yellow-800 font-medium">
+                        <AlertCircle size={14}/> {w}
+                    </div>
+                ))}
+            </div>
+        )}
+
         {/* Main Layout */}
         <div className="flex flex-1 overflow-hidden">
           
@@ -621,10 +804,12 @@ Start-Sleep -Seconds 3
                         { id: "BIOS", icon: Cpu, label: "BIOS 与固件" },
                         { id: "System", icon: Server, label: "系统信息" },
                         { id: "Board", icon: Layers, label: "主板与机箱" },
+                        { id: "Network", icon: Wifi, label: "网卡与 MAC" },
                         { id: "Storage", icon: Disc, label: "存储设备" },
-                        { id: "VM", icon: Box, label: "虚拟机设置" },
-                        { id: "Region", icon: Map, label: "地区与语言" },
-                        { id: "Security", icon: Shield, label: "Guest 伪装" },
+                        { id: "Display", icon: Image, label: "显卡与分辨率" },
+                        { id: "VM", icon: Box, label: "虚拟机资源" },
+                        { id: "Region", icon: Map, label: "地区与语言 (Guest)" },
+                        { id: "Security", icon: Shield, label: "Guest 伪装行为" },
                         { id: "Advanced", icon: Settings, label: "自定义字段" },
                     ].map(tab => (
                         <button
@@ -676,20 +861,36 @@ Start-Sleep -Seconds 3
                             </div>
                             
                             <div className="mt-4 pt-4 border-t">
-                                <label className="block text-sm font-bold text-gray-700 mb-2 flex items-center gap-2"><Code size={16}/> ACPI Custom Table (ACPI Spoof)</label>
-                                <div className="flex gap-2">
-                                    <input 
-                                        type="text" 
-                                        value={config.AcpiTablePath} 
-                                        onChange={e=>updateField('AcpiTablePath', e.target.value)}
-                                        placeholder="C:\Path\To\acpi_table.bin"
-                                        className="flex-1 border p-2 rounded font-mono text-sm"
-                                    />
+                                <label className="block text-sm font-bold text-gray-700 mb-2 flex items-center gap-2"><Code size={16}/> ACPI Custom Table</label>
+                                <input 
+                                    type="text" 
+                                    value={config.AcpiTablePath} 
+                                    onChange={e=>updateField('AcpiTablePath', e.target.value)}
+                                    placeholder="C:\Path\To\acpi_table.bin"
+                                    className="w-full border p-2 rounded font-mono text-sm"
+                                />
+                                <p className="text-xs text-gray-500 mt-1">Command: VBoxInternal/Devices/acpi/0/Config/CustomTable</p>
+                            </div>
+
+                            <div className="mt-4 pt-4 border-t">
+                                <div className="flex justify-between items-center mb-2">
+                                    <label className="block text-sm font-bold text-gray-700 flex items-center gap-2"><Cpu size={16}/> CPUID Spoofing (Type 1 Leaf 1)</label>
+                                    <select onChange={applyCpuidPreset} className="text-xs border p-1 rounded">
+                                        <option value="Default">选择 CPU 预设...</option>
+                                        {Object.keys(CPUID_PRESETS).filter(k=>k!=="Default").map(k=><option key={k} value={k}>{k}</option>)}
+                                    </select>
                                 </div>
-                                <p className="text-xs text-gray-500 mt-1">
-                                    用于加载自定义 DSDT/SSDT 表。你需要先在宿主机 Dump ACPI 表并修改。<br/>
-                                    <strong>Command:</strong> VBoxInternal/Devices/acpi/0/Config/CustomTable
-                                </p>
+                                {cpuidLeaves.map((leaf, idx) => (
+                                    <div key={idx} className="flex gap-2 items-center mb-2">
+                                        <input className="w-20 border p-1 rounded font-mono text-xs" placeholder="Leaf" value={leaf.leaf} onChange={e=>updateCpuidLeaf(idx, 'leaf', e.target.value)}/>
+                                        <input className="flex-1 border p-1 rounded font-mono text-xs" placeholder="EAX" value={leaf.eax} onChange={e=>updateCpuidLeaf(idx, 'eax', e.target.value)}/>
+                                        <input className="flex-1 border p-1 rounded font-mono text-xs" placeholder="EBX" value={leaf.ebx} onChange={e=>updateCpuidLeaf(idx, 'ebx', e.target.value)}/>
+                                        <input className="flex-1 border p-1 rounded font-mono text-xs" placeholder="ECX" value={leaf.ecx} onChange={e=>updateCpuidLeaf(idx, 'ecx', e.target.value)}/>
+                                        <input className="flex-1 border p-1 rounded font-mono text-xs" placeholder="EDX" value={leaf.edx} onChange={e=>updateCpuidLeaf(idx, 'edx', e.target.value)}/>
+                                        <button onClick={()=>removeCpuidLeaf(idx)} className="text-red-500 font-bold px-2">×</button>
+                                    </div>
+                                ))}
+                                <button onClick={addCpuidLeaf} className="text-xs text-blue-600 hover:underline">+ 添加 CPUID Leaf</button>
                             </div>
                         </div>
                     </section>
@@ -736,6 +937,65 @@ Start-Sleep -Seconds 3
                     </section>
                 )}
 
+                {activeTab === "Network" && (
+                     <section>
+                        <h2 className="text-2xl font-bold text-gray-800 mb-6 flex items-center gap-2"><Wifi/> 网络伪装</h2>
+                        <div className="bg-gray-50 p-6 rounded-xl border border-gray-100 space-y-6">
+                            <div>
+                                <label className="block text-sm font-medium mb-1">MAC 地址 (Host Spoofing)</label>
+                                <div className="flex gap-2">
+                                    <input className="flex-1 border p-2 rounded font-mono" value={vmConfig.macAddress} onChange={e=>updateVmConfig('macAddress', e.target.value)}/>
+                                    <select className="border rounded bg-white px-2" onChange={(e) => updateVmConfig('macAddress', generateRandomMac(e.target.value))}>
+                                        <option value="">随机生成 (厂商 OUI)...</option>
+                                        {Object.entries(MAC_OUIS).map(([name, code]) => (
+                                            <option key={code} value={code}>{name} ({code})</option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <p className="text-xs text-gray-500 mt-1">Generated command: --macaddress1 {vmConfig.macAddress.replace(/:/g, '')}</p>
+                            </div>
+
+                            <div>
+                                <label className="block text-sm font-medium mb-1">网卡芯片型号 (NIC Type)</label>
+                                <select className="w-full border p-2 rounded" value={vmConfig.nicType} onChange={e=>updateVmConfig('nicType', e.target.value)}>
+                                    {NIC_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                                </select>
+                                <p className="text-xs text-gray-500 mt-1">Generated command: --nictype1 {vmConfig.nicType}</p>
+                            </div>
+                        </div>
+                    </section>
+                )}
+
+                {activeTab === "Display" && (
+                     <section>
+                        <h2 className="text-2xl font-bold text-gray-800 mb-6 flex items-center gap-2"><Image/> 显卡与 Canvas 伪装</h2>
+                        <div className="bg-gray-50 p-6 rounded-xl border border-gray-100 space-y-6">
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-sm font-medium mb-1">分辨率 (Resolution)</label>
+                                    <select className="w-full border p-2 rounded" value={vmConfig.videoResolution} onChange={e=>updateVmConfig('videoResolution', e.target.value)}>
+                                        <option value="1366x768">1366 x 768 (Laptop)</option>
+                                        <option value="1920x1080">1920 x 1080 (FHD)</option>
+                                        <option value="2560x1440">2560 x 1440 (2K)</option>
+                                        <option value="3840x2160">3840 x 2160 (4K)</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium mb-1">色深 (Color Depth)</label>
+                                    <select className="w-full border p-2 rounded" value={vmConfig.videoColorDepth} onChange={e=>updateVmConfig('videoColorDepth', e.target.value)}>
+                                        <option value="16">16-bit</option>
+                                        <option value="24">24-bit</option>
+                                        <option value="32">32-bit (True Color)</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div className="bg-blue-50 p-3 rounded text-xs text-blue-700">
+                                注入 <strong>CustomVideoMode1</strong> 和 <strong>GUI/LastGuestSizeHint</strong>。这有助于对抗基于 HTML5 Canvas 的指纹识别。
+                            </div>
+                        </div>
+                    </section>
+                )}
+
                 {activeTab === "Storage" && (
                     <section>
                         <h2 className="text-2xl font-bold text-gray-800 mb-6 flex items-center gap-2"><Disc/> 处理器与存储</h2>
@@ -750,6 +1010,12 @@ Start-Sleep -Seconds 3
                                 {renderInput("序列号 (Serial)", "DiskSerialNumber")}
                                 {renderInput("型号 (Model)", "DiskModelNumber")}
                                 {renderInput("固件版本 (Firmware)", "DiskFirmwareRevision")}
+                                <div className="mt-2 pt-2 border-t">
+                                    <label className="block text-xs font-bold text-gray-500 mb-1">控制器芯片组 (Controller)</label>
+                                    <select className="w-full border p-2 rounded text-sm" value={vmConfig.storageController} onChange={e=>updateVmConfig('storageController', e.target.value)}>
+                                        {STORAGE_CONTROLLERS.map(c => <option key={c} value={c}>{c}</option>)}
+                                    </select>
+                                </div>
                             </div>
                              <div className="bg-gray-50 p-6 rounded-xl border border-gray-100 space-y-4">
                                 <h3 className="font-bold text-gray-600 mb-4 uppercase text-xs tracking-wide">光驱 (ATAPI)</h3>
@@ -758,11 +1024,6 @@ Start-Sleep -Seconds 3
                                 {renderInput("产品 ID (Product ID)", "ATAPIProductId")}
                                 {renderInput("厂商 ID (Vendor ID)", "ATAPIVendorId")}
                             </div>
-                        </div>
-                        
-                        <div className="mt-6 bg-yellow-50 p-4 rounded-lg border border-yellow-100 text-sm text-yellow-800 flex gap-2">
-                             <AlertTriangle size={16} className="shrink-0 mt-0.5"/>
-                             <p>存储信息将同时写入 <strong>AHCI (Port 0/1)</strong> 和 <strong>PIIX3 (Primary Master/Slave)</strong> 控制器以确保兼容原项目行为。</p>
                         </div>
                     </section>
                 )}
@@ -802,7 +1063,7 @@ Start-Sleep -Seconds 3
                 
                 {activeTab === "Region" && (
                     <section>
-                        <h2 className="text-2xl font-bold text-gray-800 mb-6 flex items-center gap-2"><Map/> 地区与语言 (可选)</h2>
+                        <h2 className="text-2xl font-bold text-gray-800 mb-6 flex items-center gap-2"><Map/> 地区与语言 (Guest)</h2>
                         <div className="bg-gray-50 p-6 rounded-xl border border-gray-100 space-y-4">
                              <div><label className="block text-xs font-bold text-gray-500 mb-1">区域语言 (e.g., zh-CN)</label>
                             <input className="w-full border p-2 rounded" value={regionConfig.RegionLocale} onChange={e=>updateRegionConfig('RegionLocale', e.target.value)}/></div>
@@ -810,8 +1071,15 @@ Start-Sleep -Seconds 3
                             <div><label className="block text-xs font-bold text-gray-500 mb-1">时区 (e.g., China Standard Time)</label>
                             <input className="w-full border p-2 rounded" value={regionConfig.TimeZone} onChange={e=>updateRegionConfig('TimeZone', e.target.value)}/></div>
                             
+                            <div><label className="block text-xs font-bold text-gray-500 mb-1">语言列表 (e.g., zh-CN,en-US)</label>
+                            <input className="w-full border p-2 rounded" value={regionConfig.LanguageList} onChange={e=>updateRegionConfig('LanguageList', e.target.value)}/></div>
+                            
                             <div><label className="block text-xs font-bold text-gray-500 mb-1">GeoID (244=US, 208=TW, 45=CN)</label>
                             <input className="w-full border p-2 rounded" value={regionConfig.GeoID} onChange={e=>updateRegionConfig('GeoID', e.target.value)}/></div>
+                            
+                            <div className="mt-2 text-xs text-gray-500 bg-gray-100 p-2 rounded">
+                                注意：这些设置不会影响 Host 配置，只会写入 <strong>Guest.ps1</strong> 供虚拟机内部执行。
+                            </div>
                         </div>
                     </section>
                 )}
