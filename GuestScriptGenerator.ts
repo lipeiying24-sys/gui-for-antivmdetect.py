@@ -192,6 +192,44 @@ foreach ($drv in $Drivers) {
 }
 ` : '# VBox Cleanup skipped'}
 
+# --- 5.5 Advanced Hardware Spoofing & Cleanup (Extended) ---
+Write-Host "[-] Performing Advanced PCI Device Spoofing..."
+
+$PciBase = "SYSTEM\\CurrentControlSet\\Enum\\PCI"
+Grant-RegistryOwnership $PciBase
+$PciPath = "HKLM:\\$PciBase"
+
+if (Test-Path $PciPath) {
+    Get-ChildItem $PciPath -Recurse | ForEach-Object {
+        $kPath = $_.PSPath
+        
+        # Feature 1: GPU Spoofing (VirtualBox Graphics -> NVIDIA)
+        $desc = $_.GetValue("DeviceDesc")
+        if ($desc -and ($desc -match "VirtualBox Graphics" -or $desc -match "VBoxVGA")) {
+            Write-Host "   -> Patching GPU identifier: $desc" -ForegroundColor Yellow
+            Set-ItemProperty -Path $kPath -Name "DeviceDesc" -Value "NVIDIA GeForce GTX 1050 Ti" -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $kPath -Name "FriendlyName" -Value "NVIDIA GeForce GTX 1050 Ti" -Force -ErrorAction SilentlyContinue
+            # Spoof HardwareID to a generic 1050 Ti ID
+            Set-ItemProperty -Path $kPath -Name "HardwareID" -Value @("PCI\\VEN_10DE&DEV_1C82&SUBSYS_1C8210DE&REV_A1") -Force -ErrorAction SilentlyContinue
+        }
+
+        # Feature 2: NIC Spoofing (Intel PRO/1000 -> Realtek)
+        $drv = $_.GetValue("DriverDesc")
+        if ($drv -and $drv -match "PRO/1000") {
+            Write-Host "   -> Patching NIC identifier: $drv" -ForegroundColor Yellow
+            Set-ItemProperty -Path $kPath -Name "DriverDesc" -Value "Realtek PCIe GbE Family Controller" -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $kPath -Name "FriendlyName" -Value "Realtek PCIe GbE Family Controller" -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# Feature 3: Environment Cleanup
+Write-Host "[-] Cleaning System Logs & History..."
+cmd.exe /c "wevtutil.exe cl System && wevtutil.exe cl Security && wevtutil.exe cl Application" | Out-Null
+Remove-Item (Get-PSReadlineOption).HistorySavePath -ErrorAction SilentlyContinue
+Clear-History
+Write-Host "   -> Logs cleared." -ForegroundColor DarkGray
+
 # --- 6. VolumeID Randomization ---
 ${security.randomizeVolumeId ? `
 Write-Host "[-] Checking for VolumeID..."
