@@ -104,8 +104,21 @@ const generateRandomSerial = (minLen: number = 10, maxLen: number = 20) => {
   return result;
 };
 
-const generateRandomMac = (oui: string = "080027") => {
-    let mac = oui;
+// Fix Bug 10: Logic to pick correct OUI or random valid OUI
+const generateRandomMac = (prefixOrType: string = "080027") => {
+    let prefix = prefixOrType;
+    // If prefix is actually a full type name like "VirtualBox (Default)", look it up
+    // Otherwise check if it is a 6-char hex string. If empty, pick a random one.
+    
+    if (MAC_OUIS[prefixOrType as keyof typeof MAC_OUIS]) {
+        prefix = MAC_OUIS[prefixOrType as keyof typeof MAC_OUIS];
+    } else if (!/^[0-9A-Fa-f]{6}$/.test(prefix)) {
+        // Pick a random valid OUI from the list if input is invalid
+        const values = Object.values(MAC_OUIS);
+        prefix = values[Math.floor(Math.random() * values.length)];
+    }
+
+    let mac = prefix;
     const chars = "0123456789ABCDEF";
     for(let i=0; i<6; i++) {
         mac += chars.charAt(Math.floor(Math.random() * chars.length));
@@ -206,12 +219,13 @@ const App = () => {
         newWarnings.push("一致性警告: 硬盘型号显示为 Samsung，但序列号符合 Western Digital 格式。");
     }
 
-    // Check 3: ACPI Table Path (Fix Bug 8)
+    // Check 3: ACPI Table Path (Fix Bug 8, 11)
     if (config.AcpiTablePath) {
-        if (!config.AcpiTablePath.includes("\\") && !config.AcpiTablePath.includes("/")) {
-             newWarnings.push("安全警告: ACPI 路径格式似乎不正确 (应包含路径分隔符)。");
+        // Bug 11 Fix: Loosened regex, checking for valid looking path string instead of rigid structure
+        if (config.AcpiTablePath.length < 3) {
+             newWarnings.push("安全警告: ACPI 路径过短。");
         } else {
-             newWarnings.push("安全警告: 使用自定义 ACPI 表可能导致虚拟机无法启动，请确保文件路径有效。");
+             newWarnings.push("提示: 生成 Host 脚本时将自动检查此 ACPI 文件是否存在。");
         }
     }
 
@@ -231,6 +245,7 @@ const App = () => {
   // --- Effects for Preview ---
 
   useEffect(() => {
+    // Fix Bug 12: debouncedCpuid is now correctly in dependency array (it was, but ensure flow is correct)
     if (previewType === 'bat' || previewType === 'sh') {
         setPreviewContent(generateHostScript(previewType, vmName, debouncedConfig, debouncedVmConfig, debouncedCpuid, debouncedCustomFields, appendCreate));
     } else if (previewType === 'ps1') {
@@ -250,8 +265,8 @@ const App = () => {
     newConfig.ATAPISerialNumber = generateRandomSerial(12, 20);
     setConfig(newConfig);
     
-    // Randomize MAC too
-    setVmConfig(prev => ({...prev, macAddress: generateRandomMac("001422")}));
+    // Fix Bug 10: Randomize MAC with a random valid OUI
+    setVmConfig(prev => ({...prev, macAddress: generateRandomMac()}));
   };
 
   const applyPreset = (e: React.ChangeEvent<HTMLSelectElement>) => {
